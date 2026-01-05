@@ -91,36 +91,50 @@ class DirenvProjectService(private val project: Project) {
     }
 
     private fun handleDirenvOutput(parser: JsonParser): EnvChangeSummary {
-        val added = mutableListOf<String>()
-        val modified = mutableListOf<String>()
-        val removed = mutableListOf<String>()
+        // First pass: collect all variable names and their new values from direnv output
+        // This allows us to capture the current state atomically before making any changes
+        val pendingChanges = mutableMapOf<String, String?>() // null value means unset
 
         while (parser.nextToken() != null) {
             if (parser.currentToken == JsonToken.FIELD_NAME) {
                 val varName = parser.currentName
-                val currentValue = envService.getVariable(varName)
-
                 when (parser.nextToken()) {
-                    JsonToken.VALUE_NULL -> {
-                        if (currentValue != null) {
-                            envService.unsetVariable(varName)
-                            removed.add(varName)
-                            logger.trace { "Removed variable $varName" }
-                        }
-                    }
-                    JsonToken.VALUE_STRING -> {
-                        val newValue = parser.valueAsString
-                        if (currentValue == null) {
-                            added.add(varName)
-                            logger.trace { "Added variable $varName" }
-                        } else if (currentValue != newValue) {
-                            modified.add(varName)
-                            logger.trace { "Modified variable $varName" }
-                        }
-                        envService.setVariable(varName, newValue)
-                    }
+                    JsonToken.VALUE_NULL -> pendingChanges[varName] = null
+                    JsonToken.VALUE_STRING -> pendingChanges[varName] = parser.valueAsString
                     else -> continue
                 }
+            }
+        }
+
+        // Capture current state of all affected variables before any modifications
+        // This prevents race conditions if the environment is modified concurrently
+        val previousValues = pendingChanges.keys.associateWith { envService.getVariable(it) }
+
+        // Now apply changes and categorize based on the captured snapshot
+        val added = mutableListOf<String>()
+        val modified = mutableListOf<String>()
+        val removed = mutableListOf<String>()
+
+        for ((varName, newValue) in pendingChanges) {
+            val previousValue = previousValues[varName]
+
+            if (newValue == null) {
+                // Unset variable
+                if (previousValue != null) {
+                    envService.unsetVariable(varName)
+                    removed.add(varName)
+                    logger.trace { "Removed variable $varName" }
+                }
+            } else {
+                // Set variable
+                if (previousValue == null) {
+                    added.add(varName)
+                    logger.trace { "Added variable $varName" }
+                } else if (previousValue != newValue) {
+                    modified.add(varName)
+                    logger.trace { "Modified variable $varName" }
+                }
+                envService.setVariable(varName, newValue)
             }
         }
 
