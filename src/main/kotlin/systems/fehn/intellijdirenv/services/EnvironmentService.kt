@@ -5,6 +5,10 @@ import systems.fehn.intellijdirenv.MyBundle
 
 @Service
 class EnvironmentService {
+    fun getVariable(name: String): String? {
+        return modifiableEnvironment[name]
+    }
+
     fun unsetVariable(name: String) {
         modifiableEnvironment.remove(name)
     }

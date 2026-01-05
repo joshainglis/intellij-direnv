@@ -19,6 +19,17 @@ import systems.fehn.intellijdirenv.notificationGroup
 import systems.fehn.intellijdirenv.settings.DirenvSettingsState
 import systems.fehn.intellijdirenv.switchNull
 
+/**
+ * Represents a summary of environment variable changes from a direnv import.
+ */
+data class EnvChangeSummary(
+    val added: List<String> = emptyList(),
+    val modified: List<String> = emptyList(),
+    val removed: List<String> = emptyList()
+) {
+    val hasChanges: Boolean get() = added.isNotEmpty() || modified.isNotEmpty() || removed.isNotEmpty()
+}
+
 @Service(Service.Level.PROJECT)
 class DirenvProjectService(private val project: Project) {
     private val logger by lazy { logger<DirenvProjectService>() }
@@ -50,13 +61,14 @@ class DirenvProjectService(private val project: Project) {
         jsonFactory.createParser(process.inputStream).use { parser ->
 
             try {
-                val didWork = handleDirenvOutput(parser)
+                val changeSummary = handleDirenvOutput(parser)
 
-                if (didWork) {
+                if (changeSummary.hasChanges) {
+                    val content = buildChangeSummaryMessage(changeSummary)
                     notificationGroup
                         .createNotification(
                             MyBundle.message("executedSuccessfully"),
-                            "",
+                            content,
                             NotificationType.INFORMATION,
                         ).notify(project)
                 } else if (notifyNoChange) {
@@ -78,24 +90,60 @@ class DirenvProjectService(private val project: Project) {
         }
     }
 
-    private fun handleDirenvOutput(parser: JsonParser): Boolean {
-        var didWork = false
+    private fun handleDirenvOutput(parser: JsonParser): EnvChangeSummary {
+        val added = mutableListOf<String>()
+        val modified = mutableListOf<String>()
+        val removed = mutableListOf<String>()
 
         while (parser.nextToken() != null) {
             if (parser.currentToken == JsonToken.FIELD_NAME) {
-                when (parser.nextToken()) {
-                    JsonToken.VALUE_NULL -> envService.unsetVariable(parser.currentName)
-                    JsonToken.VALUE_STRING -> envService.setVariable(parser.currentName, parser.valueAsString)
+                val varName = parser.currentName
+                val currentValue = envService.getVariable(varName)
 
+                when (parser.nextToken()) {
+                    JsonToken.VALUE_NULL -> {
+                        if (currentValue != null) {
+                            envService.unsetVariable(varName)
+                            removed.add(varName)
+                            logger.trace { "Removed variable $varName" }
+                        }
+                    }
+                    JsonToken.VALUE_STRING -> {
+                        val newValue = parser.valueAsString
+                        if (currentValue == null) {
+                            added.add(varName)
+                            logger.trace { "Added variable $varName" }
+                        } else if (currentValue != newValue) {
+                            modified.add(varName)
+                            logger.trace { "Modified variable $varName" }
+                        }
+                        envService.setVariable(varName, newValue)
+                    }
                     else -> continue
                 }
-
-                didWork = true
-                logger.trace { "Set variable ${parser.currentName} to ${parser.valueAsString}" }
             }
         }
 
-        return didWork
+        return EnvChangeSummary(added, modified, removed)
+    }
+
+    private fun buildChangeSummaryMessage(summary: EnvChangeSummary): String {
+        val parts = mutableListOf<String>()
+
+        if (summary.added.isNotEmpty()) {
+            val count = summary.added.size
+            parts.add(MyBundle.message("changeSummary.added", count))
+        }
+        if (summary.modified.isNotEmpty()) {
+            val count = summary.modified.size
+            parts.add(MyBundle.message("changeSummary.modified", count))
+        }
+        if (summary.removed.isNotEmpty()) {
+            val count = summary.removed.size
+            parts.add(MyBundle.message("changeSummary.removed", count))
+        }
+
+        return parts.joinToString(", ")
     }
 
     private fun handleDirenvError(process: Process, envrcFile: VirtualFile) {
